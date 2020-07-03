@@ -16,84 +16,10 @@ import gym
 
 Transition = namedtuple('Transition', ('state', 'action', 'mask', 'reward'))
 
-torch.utils.backcompat.broadcast_warning.enabled = True
-torch.utils.backcompat.keepdim_warning.enabled = True
+# torch.utils.backcompat.broadcast_warning.enabled = True
+# torch.utils.backcompat.keepdim_warning.enabled = True
 
-class Memory:
-    def __init__(self):
-        self.storage = []
-        
-    def push(self, *args):
-        self.storage.append(Transition(*args))
-        
-    def sample(self):
-        return Transition(*zip(*self.storage))
-    
-    def __len__(self):
-        return len(self.storage)
-    
-class Running_Stat:
-    def __init__(self, shape):
-        self._n = 0
-        self._M = np.zeros(shape)
-        self._S = np.zeros(shape)
-        
-    def push(self, x):
-        x = np.asarray(x)
-        assert x.shape == self._M.shape
-        self._n += 1
-        
-        if self._n == 1:
-            self._M[...] = x
-        else:
-            oldM = self._M.copy()
-            self._M[...] = oldM + (x - oldM) / self._n
-            self._S[...] = self._S + (x - self._M) * (x - oldM)
-            
-    @property
-    def n(self):
-        return self._n
-    
-    @property
-    def mean(self):
-        return self._M
-    
-    @property
-    def var(self):
-        return self._S / (self._n -1) if self._n > 1 else np.square(self._M)
-    
-    @property
-    def std(self):
-        return np.sqrt(self.var)
-    
-    @property
-    def shape(self):
-        return self._M.shape
-    
-class Z_Filter:
-    def __init__(self, shape, demean=True, destd=True, clip=10.0):
-        self.demean = demean
-        self.destd = destd
-        self.clip = clip
-        
-        self.rs = Running_Stat(shape)
-        
-    def __call__(self, x, update=True):
-        if update:
-            self.rs.push(x)
-            
-        if self.demean:
-            x = x - self.rs.mean
-            
-        if self.destd:
-            x = x / (self.rs.std + 1e-10)
-            
-        if self.clip:
-            x = np.clip(x, -self.clip, self.clip)
-        return x
-    
-    def output_shape(self, input_space):
-        return input_space.shape
+
 
 
 def mlp(sizes, activation, out_activation=nn.Identity):
@@ -315,7 +241,82 @@ class TRPO(nn.Module):
     def load(self, filename):
         self.policy_net.load_state_dict(torch.load(filename + '_policy_net.pth'))
         self.value_net.load_state_dict(torch.load(filename + '_value_net.pth')) 
-               
+
+class Memory:
+    def __init__(self):
+        self.storage = []
+        
+    def push(self, *args):
+        self.storage.append(Transition(*args))
+        
+    def sample(self):
+        return Transition(*zip(*self.storage))
+    
+    def __len__(self):
+        return len(self.storage)
+    
+class Running_Stat:
+    def __init__(self, shape):
+        self._n = 0
+        self._M = np.zeros(shape)
+        self._S = np.zeros(shape)
+        
+    def push(self, x):
+        x = np.asarray(x)
+        assert x.shape == self._M.shape
+        self._n += 1
+        
+        if self._n == 1:
+            self._M[...] = x
+        else:
+            oldM = self._M.copy()
+            self._M[...] = oldM + (x - oldM) / self._n
+            self._S[...] = self._S + (x - self._M) * (x - oldM)
+            
+    @property
+    def n(self):
+        return self._n
+    
+    @property
+    def mean(self):
+        return self._M
+    
+    @property
+    def var(self):
+        return self._S / (self._n -1) if self._n > 1 else np.square(self._M)
+    
+    @property
+    def std(self):
+        return np.sqrt(self.var)
+    
+    @property
+    def shape(self):
+        return self._M.shape
+    
+class Z_Filter:
+    def __init__(self, shape, demean=True, destd=True, clip=10.0):
+        self.demean = demean
+        self.destd = destd
+        self.clip = clip
+        
+        self.rs = Running_Stat(shape)
+        
+    def __call__(self, x, update=True):
+        if update:
+            self.rs.push(x)
+            
+        if self.demean:
+            x = x - self.rs.mean
+            
+        if self.destd:
+            x = x / (self.rs.std + 1e-10)
+            
+        if self.clip:
+            x = np.clip(x, -self.clip, self.clip)
+        return x
+    
+    def output_shape(self, input_space):
+        return input_space.shape               
         
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -359,7 +360,6 @@ if __name__ == '__main__':
         np.random.seed(seed)
         
         running_state = Z_Filter((state_dim, ), clip=5)
-        running_reward = Z_Filter((1, ), demean = False, clip=10)
 
         policy_kwargs = {
             'num_inputs': state_dim,
