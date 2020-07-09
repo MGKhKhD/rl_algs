@@ -98,7 +98,7 @@ class Value(nn.Module):
         return ll * self.l2_reg
     
 class TRPO(nn.Module):
-    def __init__(self, num_inputs, num_outputs, value_lr=0.001, discount=0.99, tau=0.97, max_kl=0.03, l2_reg=0.001, damping=0.1):
+    def __init__(self, env, num_inputs, num_outputs, value_lr=0.001, discount=0.99, tau=0.97, max_kl=0.03, l2_reg=0.001, damping=0.1):
         super(TRPO, self).__init__()
         self.policy_net = Gaussian_Policy(num_inputs, num_outputs)
         self.value_net = Value(num_inputs, l2_reg=l2_reg, learning_rate=value_lr)
@@ -107,6 +107,7 @@ class TRPO(nn.Module):
         self.tau = tau
         self.max_kl = max_kl
         self.damping = damping
+        self.env = env
         
     def sample(self):
         pass

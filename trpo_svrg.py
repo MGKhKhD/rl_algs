@@ -185,7 +185,6 @@ class TRPO_SVRG(nn.Module):
         self.m = m
         self.J = J
         self.nu = nu
-        self.grads = None
         
     def select_action(self, state):
         state = torch.FloatTensor(state.reshape(1, -1))
@@ -307,29 +306,27 @@ class TRPO_SVRG(nn.Module):
             success, new_params = linesearch(get_loss, prev_params, fullstep, neggdotstepdir / lm[0])
             self.policy_net.set_flat_params(new_params)
 
-        if self.grads is None:
-            loss = get_loss()
-            self.grads = autograd.grad(loss, self.policy_net.parameters())
-            trop_step(torch.cat([grad.view(-1) for grad in self.grads]).data)
-        else:
-            w_tild_flat = self.policy_net.get_flat_params()
-            _g = torch.cat([grad.view(-1) for grad in self.grads]).data
-            for j in range(self.J):
+        
+        loss = get_loss()
+        grads_main = autograd.grad(loss, self.policy_net.parameters())
+        trop_step(torch.cat([grad.view(-1) for grad in grads_main]).data)      
+        w_tild_flat = self.policy_net.get_flat_params()
+        _g = torch.cat([grad.view(-1) for grad in grads_main]).data
+        for j in range(self.J):
 
-                loss = get_loss(mini_batch=True)
-                w_flat = self.policy_net.get_flat_params()
-                grad_w = autograd.grad(loss, self.policy_net.parameters())
-                loss_grad_w = torch.cat([g.view(-1) for g in grad_w]).data
+            loss = get_loss(mini_batch=True)
+            w_flat = self.policy_net.get_flat_params()
+            grad_w = autograd.grad(loss, self.policy_net.parameters())
+            loss_grad_w = torch.cat([g.view(-1) for g in grad_w]).data
 
-                self.policy_net.set_flat_params(w_tild_flat)
-                loss = get_loss(mini_batch=True)
-                grad_w_tild = autograd.grad(loss, self.policy_net.parameters())
-                loss_grad_w_tild = torch.cat([g.view(-1) for g in grad_w_tild]).data
-                self.policy_net.set_flat_params(w_flat)
+            self.policy_net.set_flat_params(w_tild_flat)
+            loss = get_loss(mini_batch=True)
+            grad_w_tild = autograd.grad(loss, self.policy_net.parameters())
+            loss_grad_w_tild = torch.cat([g.view(-1) for g in grad_w_tild]).data
+            self.policy_net.set_flat_params(w_flat)
 
-                gg = _g + (loss_grad_w - loss_grad_w_tild)
-                trop_step(gg)
-            self.grads = gg
+            gg = _g + (loss_grad_w - loss_grad_w_tild)
+            trop_step(gg)
 
         
     def save(self, filename):
