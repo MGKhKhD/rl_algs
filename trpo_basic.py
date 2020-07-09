@@ -16,10 +16,8 @@ import gym
 
 Transition = namedtuple('Transition', ('state', 'action', 'mask', 'reward'))
 
-# torch.utils.backcompat.broadcast_warning.enabled = True
-# torch.utils.backcompat.keepdim_warning.enabled = True
-
-
+torch.utils.backcompat.broadcast_warning.enabled = True
+torch.utils.backcompat.keepdim_warning.enabled = True
 
 
 def mlp(sizes, activation, out_activation=nn.Identity):
@@ -76,42 +74,42 @@ class Gaussian_Policy(nn.Module):
             l = int(np.prod(list(p.size())))
             p.data.copy_(flat_params[idx: idx + l].view(p.size()))
             idx += l
-            
-    def get_flat_grad(self, grad_grad=False):
-        grads = []
-        for p in self.parameters():
-            if grad_grad:
-                grads.append(p.grad.view(-1))
-            else:
-                grads.append(p.gard.view(-1))
-        return torch.cat(grads)
     
 class Value(nn.Module):
-    def __init__(self, num_inputs, hidden_sizes=(400, 300), activation=nn.Tanh):
+    def __init__(self, num_inputs, hidden_sizes=(400, 300), activation=nn.Tanh, l2_reg=0.001, learning_rate=0.001):
         super(Value, self).__init__()
         self.value = mlp([num_inputs] + list(hidden_sizes) + [1], activation)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate) 
+        self.l2_reg = l2_reg     
         
     def forward(self, state):
         return self.value(state)
+    
+    def optimize(self, loss):
+        self.optimizer.zero_grad()
+        loss = self._regularize_loss() + loss
+        loss.backward()
+        self.optimizer.step()
 
-    def regularize_loss(self, loss, l2_reg=0.001):
+    def _regularize_loss(self):
         ll = 0
         for p in self.parameters():
             ll += p.data.pow(2).sum()
-        return loss + ll * l2_reg
+        return ll * self.l2_reg
     
 class TRPO(nn.Module):
     def __init__(self, num_inputs, num_outputs, value_lr=0.001, discount=0.99, tau=0.97, max_kl=0.03, l2_reg=0.001, damping=0.1):
         super(TRPO, self).__init__()
         self.policy_net = Gaussian_Policy(num_inputs, num_outputs)
-        self.value_net = Value(num_inputs)
-        self.value_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=value_lr)
+        self.value_net = Value(num_inputs, l2_reg=l2_reg, learning_rate=value_lr)
 
         self.discount = discount
         self.tau = tau
         self.max_kl = max_kl
-        self.l2_reg = l2_reg
         self.damping = damping
+        
+    def sample(self):
+        pass
 
         
     def select_action(self, state):
@@ -149,10 +147,7 @@ class TRPO(nn.Module):
     def train(self, batch):
         states, actions, value_loss, advantages = self._extract_info(batch)
 
-        self.value_optimizer.zero_grad()
-        value_loss = self.value_net.regularize_loss(loss=value_loss, l2_reg=l2_reg)   
-        value_loss.backward()
-        self.value_optimizer.step()
+        self.value_net.optimize(value_loss)
         
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
         current_log_prob = self.policy_net.log_density(states, actions, volatile=False).data.clone()
