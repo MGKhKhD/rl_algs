@@ -74,6 +74,13 @@ class Gaussian_Policy(nn.Module):
             l = int(np.prod(list(p.size())))
             p.data.copy_(flat_params[idx: idx + l].view(p.size()))
             idx += l
+            
+    def get_flat_grad(self, func, contiguous=False, data=False, create_graph=False):
+        grads = autograd.grad(func, self.parameters(), create_graph=create_graph)
+        flat_grads = torch.cat([g.contiguous().view(-1) if contiguous else g.view(-1) for g in grads])
+        if data:
+            return flat_grads.data
+        return flat_grads
     
 class Value(nn.Module):
     def __init__(self, num_inputs, hidden_sizes=(400, 300), activation=nn.Tanh, l2_reg=0.001, learning_rate=0.001):
@@ -97,9 +104,16 @@ class Value(nn.Module):
             ll += p.data.pow(2).sum()
         return ll * self.l2_reg
     
-class TRPO(nn.Module):
+    def save(self, filename):
+        torch.save(self.value.state_dict(), filename + '_value_net.pth')
+        torch.save(self.optimizer.state_dict(), filename + '_value_opt.pth')
+        
+    def load(self, filename):
+        self.value.load_state_dict(torch.load(filename + '_value_net.pth'))
+        self.optimizer.load_state_dict(torch.load(filename + '_value_opt.pth')) 
+    
+class TRPO():
     def __init__(self, env, num_inputs, num_outputs, value_lr=0.001, discount=0.99, tau=0.97, max_kl=0.03, l2_reg=0.001, damping=0.1):
-        super(TRPO, self).__init__()
         self.policy_net = Gaussian_Policy(num_inputs, num_outputs)
         self.value_net = Value(num_inputs, l2_reg=l2_reg, learning_rate=value_lr)
 
@@ -108,9 +122,6 @@ class TRPO(nn.Module):
         self.max_kl = max_kl
         self.damping = damping
         self.env = env
-        
-    def sample(self):
-        pass
 
         
     def select_action(self, state):
@@ -149,8 +160,6 @@ class TRPO(nn.Module):
         states, actions, value_loss, advantages = self._extract_info(batch)
 
         self.value_net.optimize(value_loss)
-        
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
         current_log_prob = self.policy_net.log_density(states, actions, volatile=False).data.clone()
         
         def get_loss(volatile=False):
@@ -201,21 +210,19 @@ class TRPO(nn.Module):
                     return True, x_new
             return False, x
  
-        def Fvp(v):
-            kl = get_kl().mean()
-            
-            grads = autograd.grad(kl, self.policy_net.parameters(), create_graph=True)
-            flat_grad_kl = torch.cat([grad.view(-1) for grad in grads])
-            
-            kl_v = (flat_grad_kl * Variable(v)).sum()
-            grads = autograd.grad(kl_v, self.policy_net.parameters())
-            flat_grad_grad_kl = torch.cat([grad.contiguous().view(-1) for grad in grads]).data
+        def Fvp(v, use_fim=False):
+            if use_fim:
+                pass
+            else:
+                kl = get_kl().mean()
+                flat_grad_kl = self.policy_net.get_flat_grad(kl, create_graph=True)
+                kl_v = (flat_grad_kl * Variable(v)).sum()
+                flat_grad_grad_kl = self.policy_net.get_flat_grad(kl_v, contiguous=True, data=True)
             
             return flat_grad_grad_kl + v * self.damping
         
         loss = get_loss()
-        grads = autograd.grad(loss, self.policy_net.parameters())
-        loss_grad = torch.cat([grad.view(-1) for grad in grads]).data
+        loss_grad = self.policy_net(loss, data=True)
         stepdir = conjugate_grad(Fvp, -loss_grad, 10)
         
         shs = 0.5 * (stepdir * Fvp(stepdir)).sum(0, keepdim=True)
@@ -232,11 +239,17 @@ class TRPO(nn.Module):
         
     def save(self, filename):
         torch.save(self.policy_net.state_dict(), filename + '_policy_net.pth')
-        torch.save(self.value_net.state_dict(), filename + '_value_net.pth')
+        self.value_net.save()
         
     def load(self, filename):
         self.policy_net.load_state_dict(torch.load(filename + '_policy_net.pth'))
-        self.value_net.load_state_dict(torch.load(filename + '_value_net.pth')) 
+        self.value_net.load()
+        
+        
+class Experiment():
+    def __init__(self, device, dtype=torch.float64, num_threads=1):
+        self.num_threads = num_threads
+        
 
 class Memory:
     def __init__(self):
@@ -245,8 +258,15 @@ class Memory:
     def push(self, *args):
         self.storage.append(Transition(*args))
         
-    def sample(self):
-        return Transition(*zip(*self.storage))
+    def sample(self, batch_size=None):
+        if batch_size is None:
+            return Transition(*zip(*self.storage))
+        else:
+            ids = np.random.randint(0, len(self.storage), batch_size)
+            return Transition(*zip(*self.storage[ids]))
+        
+    def append(self, new_storage):
+        self.storage += new_storage.storage
     
     def __len__(self):
         return len(self.storage)
@@ -324,7 +344,14 @@ if __name__ == '__main__':
     parser.add_argument('--max_kl', default=0.001)
     parser.add_argument('--damping', default=0.1)
     parser.add_argument('--l2_reg', default=0.001)
+    # parser.add_argument('--gpu_index', default=0)
     args = parser.parse_args()
+    
+    # dtype = torch.float64
+    # torch.set_default_dtype(dtype)
+    # device = torch.device('cuda', index=args.gpu_index) if torch.cuda.is_available() else torch.device('cpu')
+    # if torch.cuda.is_available():
+    #     torch.cuda.set_device(args.gpu_index) 
     
     policy_name = 'TRPO'
     
