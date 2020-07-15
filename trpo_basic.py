@@ -113,7 +113,7 @@ class Value(nn.Module):
         self.optimizer.load_state_dict(torch.load(filename + '_value_opt.pth')) 
     
 class TRPO():
-    def __init__(self, env, num_inputs, num_outputs, value_lr=0.001, discount=0.99, tau=0.97, max_kl=0.03, l2_reg=0.001, damping=0.1):
+    def __init__(self, env, num_inputs, num_outputs, value_lr=0.001, discount=0.99, tau=0.97, max_kl=0.03, l2_reg=0.001, damping=0.1, J=40, m=2000, nu=0.1, use_fim):
         self.policy_net = Gaussian_Policy(num_inputs, num_outputs)
         self.value_net = Value(num_inputs, l2_reg=l2_reg, learning_rate=value_lr)
 
@@ -122,7 +122,11 @@ class TRPO():
         self.max_kl = max_kl
         self.damping = damping
         self.env = env
-
+        self.nu = nu 
+        self.J = J
+        self.m = m
+        self.svrg = False
+        self.use_fim = use_fim
         
     def select_action(self, state):
         state = torch.FloatTensor(state.reshape(1, -1))
@@ -163,12 +167,22 @@ class TRPO():
         current_log_prob = self.policy_net.log_density(states, actions, volatile=False).data.clone()
         
         def get_loss(volatile=False):
-            log_prob = self.policy_net.log_density(states, actions, volatile=volatile)
-            action_loss = -Variable(advantages) * torch.exp(log_prob - Variable(current_log_prob))
-            return action_loss.mean()
+            if self.svrg:
+                ids = np.random.randint(0, actions.size(0), self.m)
+                log_prob = self.policy_net.log_density(states[ids], actions[ids], volatile=volatile)
+                action_loss = -Variable(advantages[ids]) * torch.exp(log_prob - Variable(current_log_prob[ids]))
+                return action_loss.mean()
+            else:
+                log_prob = self.policy_net.log_density(states, actions, volatile=volatile)
+                action_loss = -Variable(advantages) * torch.exp(log_prob - Variable(current_log_prob))
+                return action_loss.mean()
         
         def get_kl():
-            return self.policy_net.kl_div_current_new(states)
+            if self.svrg:
+                ids = np.random.randint(0, actions.size(0), int(self.nu * actions.size(0)))
+                return self.policy_net.kl_div_current_new(states[ids])
+            else:
+                return self.policy_net.kl_div_current_new(states)
         
         self._trpo_step(get_loss, get_kl)
 
@@ -210,8 +224,8 @@ class TRPO():
                     return True, x_new
             return False, x
  
-        def Fvp(v, use_fim=False):
-            if use_fim:
+        def Fvp(v):
+            if self.use_fim:
                 pass
             else:
                 kl = get_kl().mean()
@@ -221,21 +235,40 @@ class TRPO():
             
             return flat_grad_grad_kl + v * self.damping
         
+        def update_direction(loss_grad):
+            stepdir = conjugate_grad(Fvp, -loss_grad, 10)
+        
+            shs = 0.5 * (stepdir * Fvp(stepdir)).sum(0, keepdim=True)
+            lm = torch.sqrt(shs / self.max_kl)
+            fullstep = stepdir / lm[0]
+            
+            neggdotstepdir = (-loss_grad * stepdir).sum(0, keepdim=True)
+            print("Lagrange multiplier ", lm[0], 'grad_norm: ', loss_grad.norm())
+            
+            prev_params = self.policy_net.get_flat_params()
+            success, new_params = linesearch(get_loss, prev_params, fullstep, neggdotstepdir / lm[0])
+            self.policy_net.set_flat_params(new_params)
+        
+        self.svrg = False
         loss = get_loss()
-        loss_grad = self.policy_net(loss, data=True)
-        stepdir = conjugate_grad(Fvp, -loss_grad, 10)
+        loss_grad = self.policy_net.get_flat_grad(loss, data=True)
+        update_direction(loss_grad)
+        if self.J > 0:
+            self.svrg = True
+            w_tild = self.policy_net.get_flat_params()
+            for j in range(self.J):
+                loss = get_loss()
+                w_flat = self.policy_net.get_flat_params()
+                loss_t = self.policy_net.get_flat_grad(loss, data=True)
+                
+                self.policy_net.set_flat_params(w_tild)
+                loss = get_loss()
+                loss_tt = self.policy_net.get_flat_grad(loss, data=True)
+                self.policy_net.set_flat_params(w_flat)
+                
+                gg = loss_grad + (loss_t - loss_tt)
+                update_direction(gg)
         
-        shs = 0.5 * (stepdir * Fvp(stepdir)).sum(0, keepdim=True)
-        lm = torch.sqrt(shs / self.max_kl)
-        fullstep = stepdir / lm[0]
-        
-        neggdotstepdir = (-loss_grad * stepdir).sum(0, keepdim=True)
-        print("Lagrange multiplier ", lm[0], 'grad_norm: ', loss_grad.norm())
-        
-        prev_params = self.policy_net.get_flat_params()
-        success, new_params = linesearch(get_loss, prev_params, fullstep, neggdotstepdir / lm[0])
-        self.policy_net.set_flat_params(new_params)
-        return loss
         
     def save(self, filename):
         torch.save(self.policy_net.state_dict(), filename + '_policy_net.pth')
