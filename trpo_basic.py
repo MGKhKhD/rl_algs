@@ -92,7 +92,7 @@ class Value(nn.Module):
     def forward(self, state):
         return self.value(state)
     
-    def optimize(self, loss):
+    def optimize(self, loss, regularize=True):
         self.optimizer.zero_grad()
         loss = self._regularize_loss() + loss
         loss.backward()
@@ -113,7 +113,8 @@ class Value(nn.Module):
         self.optimizer.load_state_dict(torch.load(filename + '_value_opt.pth')) 
     
 class TRPO():
-    def __init__(self, env, num_inputs, num_outputs, value_lr=0.001, discount=0.99, tau=0.97, max_kl=0.03, l2_reg=0.001, damping=0.1, J=40, m=2000, nu=0.1, use_fim):
+    def __init__(self, env, num_inputs, num_outputs, value_lr=0.001, discount=0.99, tau=0.97, max_kl=0.03, 
+                 l2_reg=0.001, damping=0.1, J=40, m=2000, nu=0.1, use_fim=False, ppo=False, clip_ratio=0.2):
         self.policy_net = Gaussian_Policy(num_inputs, num_outputs)
         self.value_net = Value(num_inputs, l2_reg=l2_reg, learning_rate=value_lr)
 
@@ -127,6 +128,11 @@ class TRPO():
         self.m = m
         self.svrg = False
         self.use_fim = use_fim
+        
+        self.ppo = ppo
+        self.clip_ratio = clip_ratio
+        if self.ppo:
+            self.policy_opt = torch.optim.Adam(self.policy_net.parameters(), lr=value_lr)
         
     def select_action(self, state):
         state = torch.FloatTensor(state.reshape(1, -1))
@@ -183,8 +189,21 @@ class TRPO():
                 return self.policy_net.kl_div_current_new(states[ids])
             else:
                 return self.policy_net.kl_div_current_new(states)
+            
+        def get_ppo_loss():
+            log_prob = self.policy_net.log_density(states, actions, volatile=True)
+            ratio = torch.exp(log_prob - Variable(current_log_prob))
+            clip_adv = torch.clamp(ratio, 1. - self.clip_ratio, 1. + self.clip_ratio) * advantages
+            action_loss = -torch.min(clip_adv, ratio * advantages)
+            return action_loss.mean()
         
-        self._trpo_step(get_loss, get_kl)
+        if self.ppo:
+            loss = get_ppo_loss()
+            self.policy_opt.zero_grad()
+            loss.backward()
+            self.policy_opt.step()
+        else:
+            self._trpo_step(get_loss, get_kl)
 
     def _trpo_step(self, get_loss, get_kl):
 
@@ -274,9 +293,15 @@ class TRPO():
         torch.save(self.policy_net.state_dict(), filename + '_policy_net.pth')
         self.value_net.save()
         
+        if self.ppo:
+            torch.save(self.policy_opt.state_dict(), filename + '_policy_opt.pth')
+        
     def load(self, filename):
         self.policy_net.load_state_dict(torch.load(filename + '_policy_net.pth'))
         self.value_net.load()
+        
+        if self.ppo:
+            self.policy_opt.load_state_dict(torch.load(filename + '_policy_opt.pth'))
         
         
 class Experiment():
